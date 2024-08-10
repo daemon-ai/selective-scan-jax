@@ -5,8 +5,8 @@ from jax import numpy as jnp
 import jax._src.test_util as jtu
 
 from jax.test_util import check_grads
-from selective_scan_jax import mamba
-from utils import selective_scan_ref, mamba_inner_ref
+from selective_scan_jax import selective_scan
+from utils import selective_scan_ref, selective_scan_inner_ref
 
 import torch
 import pytest
@@ -15,7 +15,7 @@ from einops import rearrange
 jax.config.update("jax_enable_x64", True)
 
 
-def test_mamba_fwd(is_var = False):
+def test_selective_scan_fwd(is_var = False):
     batch_size = 2
     dim = 4
     dstate = 8
@@ -36,22 +36,22 @@ def test_mamba_fwd(is_var = False):
     delta_bias_ = 0.5*np.random.rand(dim).astype(np.float32)    
 
     if is_var:
-        out, x, out_z = jax.jit(mamba)(
+        out, x, out_z = jax.jit(selective_scan)(
             u, delta, A, B, C, D_=D_, z_=z_,
             delta_bias_=delta_bias_, delta_softplus=True
         )
     else:
         out_z = np.zeros(1)
-        out, x = jax.jit(mamba)(
+        out, x = jax.jit(selective_scan)(
             u, delta, A, B, C, D_=None, z_=None,
             delta_bias_=None, delta_softplus=True
         )
 
     print(out, x, out.shape, x.shape, out_z.shape)
 
-def test_mamba_bwd():
+def test_selective_scan_bwd():
     def loss(*args, **kwargs):
-        out, x = mamba(*args, **kwargs)
+        out, x = selective_scan(*args, **kwargs)
         return -jnp.mean(out**2)
 
     batch_size = 2
@@ -79,7 +79,7 @@ def test_mamba_bwd():
 # ===============================
 from causal_conv1d_jax import causal_conv1d
 
-def mamba_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
+def selective_scan_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
                               delta_proj_weight, out_proj_weight, out_proj_bias,
                               A, B, C, D,
                               delta_bias, delta_softplus,
@@ -118,7 +118,7 @@ def mamba_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
         print('D', np.shape(D))
         print('z', np.shape(z))
         print('delta_bias', np.shape(delta_bias))
-    out, scan_intermediates, out_z = mamba(
+    out, scan_intermediates, out_z = selective_scan(
             conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
     )
 
@@ -137,7 +137,7 @@ def mamba_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
 @pytest.mark.parametrize('seqlen', [128])
 @pytest.mark.parametrize("is_variable_C", [False, True])
 @pytest.mark.parametrize("is_variable_B", [False, True])
-def unit_test_mamba(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtype):
+def unit_test_selective_scan(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtype):
     # set seed
     key = jax.random.PRNGKey(0)
     rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
@@ -216,7 +216,7 @@ def unit_test_mamba(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtyp
 
     delta_bias_ref = torch.tensor(np.array(delta_bias), requires_grad=True).cuda() if delta_bias is not None else None
 
-    out_ref = mamba_inner_ref(xz_ref, conv1d_weight_ref, conv1d_bias_ref, x_proj_weight_ref,
+    out_ref = selective_scan_inner_ref(xz_ref, conv1d_weight_ref, conv1d_bias_ref, x_proj_weight_ref,
                               delta_proj_weight_ref, out_proj_weight_ref, out_proj_bias_ref,
                               A_ref, B_ref, C_ref, D_ref,
                               delta_bias=delta_bias_ref, delta_softplus=True)
@@ -224,7 +224,7 @@ def unit_test_mamba(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtyp
     print("Out shape:", out_ref.shape)
     #print("Out tensor:", out_ref)
 
-    out = jax.jit(mamba_fn)(xz, conv1d_weight, conv1d_bias, x_proj_weight,
+    out = jax.jit(selective_scan_fn)(xz, conv1d_weight, conv1d_bias, x_proj_weight,
                    delta_proj_weight, out_proj_weight, out_proj_bias,
                    A, B, C, D,
                    delta_bias, delta_softplus=True
@@ -243,7 +243,7 @@ def unit_test_mamba(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtyp
                    delta_proj_weight, out_proj_weight, out_proj_bias,
                    A, B, C, D,
                    delta_bias, delta_softplus):
-        out = mamba_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
+        out = selective_scan_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight,
                     delta_proj_weight, out_proj_weight, out_proj_bias,
                     A, B, C, D,
                     delta_bias, delta_softplus
@@ -268,12 +268,12 @@ def unit_test_mamba(TEST_NAME, is_variable_B, is_variable_C, seqlen, itype, wtyp
     """
 
 if __name__ == "__main__":
-    #test_mamba_fwd(is_var=False)
-    #test_mamba_fwd(is_var=True)
-    #test_mamba_bwd()
+    #test_selective_scan_fwd(is_var=False)
+    #test_selective_scan_fwd(is_var=True)
+    #test_selective_scan_bwd()
 
-    #unit_test_mamba("TEMP", False, False, 128, np.float32, np.complex64)
-    #unit_test_mamba("TEMP", True, True, 128, np.float32, np.complex64)
+    #unit_test_selective_scan("TEMP", False, False, 128, np.float32, np.complex64)
+    #unit_test_selective_scan("TEMP", True, True, 128, np.float32, np.complex64)
 
-    #unit_test_mamba("TEMP", True, True, 128, np.float32, np.float32)
-    unit_test_mamba("TEMP", False, False, 128, np.float32, np.float32)
+    #unit_test_selective_scan("TEMP", True, True, 128, np.float32, np.float32)
+    unit_test_selective_scan("TEMP", False, False, 128, np.float32, np.float32)

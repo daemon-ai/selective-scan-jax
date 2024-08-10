@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-__all__ = ["mamba"]
+__all__ = ["selective_scan"]
 
 from functools import partial
 
@@ -24,7 +24,7 @@ else:
         xla_client.register_custom_call_target(_name, _value, platform="gpu")
 
 #==============================================================================
-def mamba_fwd(u, delta,
+def selective_scan_fwd(u, delta,
               A, B, C,
               D_, z_, delta_bias_,
               delta_softplus):
@@ -39,14 +39,14 @@ def mamba_fwd(u, delta,
         delta_bias_ = jnp.nan
 
     if has_z:
-        out, x, out_z = _mamba_fwd_prim.bind(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
+        out, x, out_z = _selective_scan_fwd_prim.bind(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
         return (out, x, out_z), (u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
     else:
-        out, x = _mamba_fwd_prim.bind(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
+        out, x = _selective_scan_fwd_prim.bind(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
         return (out, x), (u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
 
 
-def mamba_bwd(res, grad):
+def selective_scan_bwd(res, grad):
     #print("Grad(out)", grad)
     #print("Bwd call", bias)
     u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus = res
@@ -62,19 +62,19 @@ def mamba_bwd(res, grad):
         g_out, g_x = grad
         g_out_z = jnp.nan
 
-    g_u, g_delta, g_A, g_B, g_C, g_D, g_z, g_delta_bias = _mamba_bwd_prim.bind(
+    g_u, g_delta, g_A, g_B, g_C, g_D, g_z, g_delta_bias = _selective_scan_bwd_prim.bind(
         g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus
     )
     # TODO: gradient for D_, z_, delta_bias_
     return g_u, g_delta, g_A, g_B, g_C, g_D, g_z, g_delta_bias, None
 
 @partial(jax.custom_vjp)
-def mamba(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
-    output, _ = mamba_fwd(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
+def selective_scan(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
+    output, _ = selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
     return output
 
 # === Differentiation rule ===
-mamba.defvjp(mamba_fwd, mamba_bwd)
+selective_scan.defvjp(selective_scan_fwd, selective_scan_bwd)
 
 # *********************************
 # *  SUPPORT FOR JIT COMPILATION  *
@@ -82,7 +82,7 @@ mamba.defvjp(mamba_fwd, mamba_bwd)
 
 # For JIT compilation we need a function to evaluate the shape and dtype of the
 # outputs of our op for some given inputs
-def _mamba_fwd_abstract(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
+def _selective_scan_fwd_abstract(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
     inp_dtype = dtypes.canonicalize_dtype(u.dtype)
     w_dtype = dtypes.canonicalize_dtype(A.dtype)
     B_dtype = dtypes.canonicalize_dtype(B.dtype)
@@ -144,7 +144,7 @@ def _mamba_fwd_abstract(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
         return (ShapedArray(delta.shape, inp_dtype),
                 ShapedArray((batch_size, dim, n_chunks, dstate * 2), inp_dtype),)
 
-def _mamba_bwd_abstract(g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
+def _selective_scan_bwd_abstract(g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus):
     #print()
     assert g_out.shape == delta.shape
     #assert g_x == ..
@@ -152,7 +152,7 @@ def _mamba_bwd_abstract(g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bi
 
     inp_dtype = dtypes.canonicalize_dtype(u.dtype)
     w_dtype = dtypes.canonicalize_dtype(A.dtype)
-    _mamba_fwd_abstract(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
+    _selective_scan_fwd_abstract(u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus)
     return (ShapedArray(u.shape, inp_dtype),
             ShapedArray(delta.shape, inp_dtype),
             ShapedArray(A.shape, w_dtype),
@@ -181,7 +181,7 @@ def get_op_precisions(x_np_dtype):
     return prec_name
 
 # Lowering:  C++ and/or CUDA interfaces to the JAX XLA backend
-def _mamba_fwd_lowering(ctx, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus, *, platform="gpu"):
+def _selective_scan_fwd_lowering(ctx, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus, *, platform="gpu"):
     # Extract the numpy type of the inputs
     u_aval, A_aval = ctx.avals_in[0], ctx.avals_in[2]
     inp_np_dtype = np.dtype(u_aval.dtype)
@@ -203,7 +203,7 @@ def _mamba_fwd_lowering(ctx, u, delta, A, B, C, D_, z_, delta_bias_, delta_softp
                 [u, delta, A, B, C, D_, z_, delta_bias_]]
 
     # We dispatch a different call depending on the dtype
-    op_name = platform + "_mamba_fwd" + get_op_precisions(inp_np_dtype)
+    op_name = platform + "_selective_scan_fwd" + get_op_precisions(inp_np_dtype)
 
     # Output dims
     batch_size, dim, seqlen = u_dims[0:3]
@@ -234,7 +234,7 @@ def _mamba_fwd_lowering(ctx, u, delta, A, B, C, D_, z_, delta_bias_, delta_softp
         print("Dims:", batch_size, dim, seqlen, dstate, n_groups, n_chunks, dim_ngroups_ratio,
             1 if delta_softplus else 0, has_z, has_D, has_delta_bias,
             is_var_B, is_var_C)
-        opaque = selective_scan_jax_cuda.build_mamba_descriptor(
+        opaque = selective_scan_jax_cuda.build_selective_scan_descriptor(
             batch_size, dim, seqlen, dstate, n_groups, n_chunks, dim_ngroups_ratio,
             1 if delta_softplus else 0, has_z, has_D, has_delta_bias,
             is_var_B, is_var_C)
@@ -254,7 +254,7 @@ def _mamba_fwd_lowering(ctx, u, delta, A, B, C, D_, z_, delta_bias_, delta_softp
         "Unsupported platform; this must be either 'cpu' or 'gpu'"
     )
 
-def _mamba_bwd_lowering(ctx, g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus, *, platform="gpu"):
+def _selective_scan_bwd_lowering(ctx, g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_, delta_softplus, *, platform="gpu"):
     #raise NotImplementedError("Bwd not implemented")
 
     # === Extract dtypes ===
@@ -276,7 +276,7 @@ def _mamba_bwd_lowering(ctx, g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, del
                 [g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, delta_bias_]]
 
     # === Dispatch a different call depending on the dtype ===
-    op_name = platform + "_mamba_bwd" + get_op_precisions(inp_np_dtype)
+    op_name = platform + "_selective_scan_bwd" + get_op_precisions(inp_np_dtype)
 
     # === Output dims ===
     batch_size, dim, seqlen = u_dims[0:3]
@@ -318,7 +318,7 @@ def _mamba_bwd_lowering(ctx, g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, del
             1 if delta_softplus else 0, has_z, has_D, has_delta_bias,
             is_var_B, is_var_C)
 
-        opaque = selective_scan_jax_cuda.build_mamba_descriptor(
+        opaque = selective_scan_jax_cuda.build_selective_scan_descriptor(
             batch_size, dim, seqlen, dstate, n_groups, n_chunks, dim_ngroups_ratio,
             1 if delta_softplus else 0, has_z, has_D, has_delta_bias,
             is_var_B, is_var_C)
@@ -341,25 +341,25 @@ def _mamba_bwd_lowering(ctx, g_out, g_x, g_out_z, u, delta, A, B, C, D_, z_, del
 # *********************************************
 # *  BOILERPLATE TO REGISTER THE OP WITH JAX  *
 # *********************************************
-_mamba_fwd_prim = core.Primitive("mamba_fwd")
-_mamba_fwd_prim.multiple_results = True
-_mamba_fwd_prim.def_impl(partial(xla.apply_primitive, _mamba_fwd_prim))
-_mamba_fwd_prim.def_abstract_eval(_mamba_fwd_abstract)
+_selective_scan_fwd_prim = core.Primitive("selective_scan_fwd")
+_selective_scan_fwd_prim.multiple_results = True
+_selective_scan_fwd_prim.def_impl(partial(xla.apply_primitive, _selective_scan_fwd_prim))
+_selective_scan_fwd_prim.def_abstract_eval(_selective_scan_fwd_abstract)
 
-_mamba_bwd_prim = core.Primitive("mamba_bwd")
-_mamba_bwd_prim.multiple_results = True
-_mamba_bwd_prim.def_impl(partial(xla.apply_primitive, _mamba_bwd_prim))
-_mamba_bwd_prim.def_abstract_eval(_mamba_bwd_abstract)
+_selective_scan_bwd_prim = core.Primitive("selective_scan_bwd")
+_selective_scan_bwd_prim.multiple_results = True
+_selective_scan_bwd_prim.def_impl(partial(xla.apply_primitive, _selective_scan_bwd_prim))
+_selective_scan_bwd_prim.def_abstract_eval(_selective_scan_bwd_abstract)
 
 
 # Connect the XLA translation rules for JIT compilation
 for platform in ["gpu"]:
     mlir.register_lowering(
-        _mamba_fwd_prim,
-        partial(_mamba_fwd_lowering, platform=platform),
+        _selective_scan_fwd_prim,
+        partial(_selective_scan_fwd_lowering, platform=platform),
         platform=platform)
 
     mlir.register_lowering(
-        _mamba_bwd_prim,
-        partial(_mamba_bwd_lowering, platform=platform),
+        _selective_scan_bwd_prim,
+        partial(_selective_scan_bwd_lowering, platform=platform),
         platform=platform)
